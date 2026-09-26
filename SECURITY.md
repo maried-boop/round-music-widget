@@ -1,5 +1,3 @@
-Créé par Codex, le [[2026-09-26-Sat]]
-
 # Security policy
 
 ## Reporting a vulnerability
