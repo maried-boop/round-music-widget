@@ -1,0 +1,40 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        os:
+          - macos-14
+          - macos-26
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build release binaries
+        run: swift build --configuration release
+
+      - name: Validate property lists
+        run: |
+          plutil -lint Info.plist
+          plutil -lint launchd/com.mariedrouvin.round-music-widget.music-watcher.plist
+
+      - name: Check source portability
+        run: |
+          personal_root='/'"Users/"
+          if git grep -n "$personal_root"; then
+            echo 'A personal absolute path was found.' >&2
+            exit 1
+          fi
