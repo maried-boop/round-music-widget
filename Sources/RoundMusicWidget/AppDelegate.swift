@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             frame: NSRect(origin: .zero, size: size),
             controller: controller
         )
+        panel.acceptsMouseMovedEvents = true
 
         if !panel.setFrameUsingName(FloatingPanel.autosaveName) {
             panel.center()

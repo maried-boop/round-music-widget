@@ -42,6 +42,10 @@ fi
     "$project_root/Info.plist" \
     "$contents_dir/Info.plist"
 
+/usr/bin/ditto \
+    "$binary_directory/RoundMusicWidget_RoundMusicWidget.bundle" \
+    "$contents_dir/Resources/RoundMusicWidget_RoundMusicWidget.bundle"
+
 /usr/bin/codesign \
     --force \
     --sign - \

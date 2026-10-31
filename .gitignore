@@ -3,4 +3,11 @@ dist/
 .swiftpm/
 .DS_Store
 Round Music Widget - context.md
-Sources/RoundMusicWidget/Resources/
+Sources/RoundMusicWidget/Resources/*
+!Sources/RoundMusicWidget/Resources/orb-settings.json
+!Sources/RoundMusicWidget/Resources/orb-shader.txt
+!Sources/RoundMusicWidget/Resources/lens-map.rgba
+
+# Local working artwork and generated exports
+/album covers/
+/exports/

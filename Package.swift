@@ -18,7 +18,13 @@ let package = Package(
         )
     ],
     targets: [
-        .executableTarget(name: "RoundMusicWidget"),
-        .executableTarget(name: "MusicLifecycleWatcher")
+        .executableTarget(name: "RoundMusicWidget", resources: [
+            .copy("Resources/orb-settings.json"),
+            .copy("Resources/orb-shader.txt"),
+            .copy("Resources/lens-map.rgba")
+        ]),
+        .executableTarget(name: "MusicLifecycleWatcher"),
+        .testTarget(name: "RoundMusicWidgetTests", dependencies: ["RoundMusicWidget"],
+                    resources: [.copy("Fixtures/original-lens.png")])
     ]
 )

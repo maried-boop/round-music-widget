@@ -6,6 +6,7 @@ final class WidgetView: NSView {
     private let controller: MusicController
     private let artworkView = PassthroughImageView()
     private let glassOverlay = GlassOverlayView()
+    private let orbView = (try? OrbSettings.bundled()).flatMap { OrbView(settings: $0) }
     private let circularTitleView = CircularTitleView()
     private let previousButton: GlassControlButton
     private let playPauseButton: GlassControlButton
@@ -58,6 +59,14 @@ final class WidgetView: NSView {
         artworkView.frame = circleFrame
         artworkView.layer?.cornerRadius = circleFrame.width / 2
         glassOverlay.frame = circleFrame
+        if let orbView {
+            // Fit the chosen orb inside the existing widget diameter. Its canvas
+            // padding is transparent space, not a request to shrink the widget.
+            let canvasDiameter = diameter / CGFloat(orbView.settings.size)
+            orbView.frame = NSRect(x: bounds.midX - canvasDiameter / 2,
+                                   y: bounds.midY - canvasDiameter / 2,
+                                   width: canvasDiameter, height: canvasDiameter)
+        }
         circularTitleView.frame = circleFrame
 
         let scale = bounds.width / 300
@@ -89,7 +98,7 @@ final class WidgetView: NSView {
 
         let trackingArea = NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
             owner: self,
             userInfo: nil
         )
@@ -100,11 +109,18 @@ final class WidgetView: NSView {
     override func mouseEntered(with event: NSEvent) {
         setControlsOpacity(1)
         setTitleVisible(!circularTitleView.title.isEmpty)
+        mouseMoved(with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard let orbView else { return }
+        orbView.follow(orbView.convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
         setControlsOpacity(0.74)
         setTitleVisible(false)
+        orbView?.follow(nil)
     }
 
     override func resetCursorRects() {
@@ -145,7 +161,7 @@ final class WidgetView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
 
-        artworkView.setArtwork(makeFallbackArtwork())
+        setArtwork(makeFallbackArtwork())
         artworkView.imageScaling = .scaleProportionallyUpOrDown
         artworkView.wantsLayer = true
         artworkView.layer?.masksToBounds = true
@@ -155,6 +171,7 @@ final class WidgetView: NSView {
 
         addSubview(artworkView)
         addSubview(glassOverlay)
+        if let orbView { addSubview(orbView) }
         addSubview(circularTitleView)
         addSubview(previousButton)
         addSubview(playPauseButton)
@@ -177,6 +194,8 @@ final class WidgetView: NSView {
 
     private func configurePlaybackObservation() {
         controller.onPlaybackStateChanged = { [weak self] isPlaying in
+            self?.orbView?.isPlaying = isPlaying
+            self?.artworkView.isPlaying = isPlaying && self?.orbView?.hasArtwork != true
             self?.playPauseButton.setSymbol(
                 isPlaying ? "pause.fill" : "play.fill",
                 accessibilityLabel: isPlaying ? "Pause" : "Play"
@@ -192,14 +211,25 @@ final class WidgetView: NSView {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.20
                 self.artworkView.animator().alphaValue = 0
+                self.orbView?.animator().alphaValue = 0
             } completionHandler: { [weak self] in
-                self?.artworkView.setArtwork(nextImage)
+                self?.setArtwork(nextImage)
                 NSAnimationContext.runAnimationGroup { context in
                     context.duration = 0.24
                     self?.artworkView.animator().alphaValue = 1
+                    self?.orbView?.animator().alphaValue = 1
                 }
             }
         }
+    }
+
+    private func setArtwork(_ image: NSImage?) {
+        artworkView.setArtwork(image)
+        orbView?.setArtwork(image)
+        let rendered = orbView?.hasArtwork == true
+        artworkView.isHidden = rendered
+        glassOverlay.isHidden = rendered
+        artworkView.isPlaying = controller.isPlaying && !rendered
     }
 
     private func configureTrackInfoObservation() {
@@ -342,22 +372,89 @@ private final class GlassControlButton: NSView {
     }
 }
 
-private final class PassthroughImageView: NSImageView {
+final class PassthroughImageView: NSImageView {
     private static let renderingContext = CIContext()
+    private var sourceImage: NSImage?
+    private var preparedInput: CIImage?
+    private var motionTimer: Timer?
+    private var phase: Double = 0
+    private var lastTick: TimeInterval?
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    var isPlaying = false { didSet { updateMotion() } }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        for (center, name) in [
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.accessibilityDisplayOptionsDidChangeNotification),
+            (NotificationCenter.default, NSWindow.didChangeOcclusionStateNotification)
+        ] {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.updateMotion()
+            }
+            observers.append((center, token))
+        }
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    deinit {
+        motionTimer?.invalidate()
+        observers.forEach { $0.0.removeObserver($0.1) }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateMotion()
+    }
+
+    private func updateMotion() {
+        motionTimer?.invalidate()
+        motionTimer = nil
+        lastTick = nil
+        guard isPlaying, preparedInput != nil,
+              window?.occlusionState.contains(.visible) == true,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let timer = Timer(timeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            let elapsed = min(0.2, now - (self.lastTick ?? now))
+            self.lastTick = now
+            self.phase = (self.phase + elapsed * 2 * .pi / 56)
+                .truncatingRemainder(dividingBy: 2 * .pi)
+            self.renderFrame()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        motionTimer = timer
+    }
 
     func setArtwork(_ sourceImage: NSImage?) {
+        self.sourceImage = sourceImage
+        preparedInput = nil
+        phase = 0
         guard let sourceImage else {
             image = nil
+            updateMotion()
             return
         }
 
-        image = Self.renderEdgeStretch(sourceImage) ?? sourceImage
+        if let data = sourceImage.tiffRepresentation, let input = CIImage(data: data) {
+            // Bound repeated rendering cost on large covers. The original filter
+            // and all of its relative dimensions stay the same.
+            let scale = min(1, 1024 / max(input.extent.width, input.extent.height))
+            preparedInput = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        renderFrame()
+        updateMotion()
     }
 
-    private static func renderEdgeStretch(_ sourceImage: NSImage) -> NSImage? {
-        guard let data = sourceImage.tiffRepresentation,
-              let input = CIImage(data: data),
-              let lens = CIFilter(name: "CITorusLensDistortion"),
+    private func renderFrame() {
+        guard let sourceImage else { return }
+        guard let preparedInput else { image = sourceImage; return }
+        image = Self.renderEdgeStretch(preparedInput, size: sourceImage.size, phase: phase) ?? sourceImage
+    }
+
+    static func renderEdgeStretch(_ input: CIImage, size: NSSize, phase: Double = 0) -> NSImage? {
+        guard let lens = CIFilter(name: "CITorusLensDistortion"),
               let mask = CIFilter(name: "CIRadialGradient"),
               let blend = CIFilter(name: "CIBlendWithMask") else {
             return nil
@@ -369,8 +466,10 @@ private final class PassthroughImageView: NSImageView {
         lens.setValue(input, forKey: kCIInputImageKey)
         lens.setValue(center, forKey: kCIInputCenterKey)
         lens.setValue(diameter * 0.50, forKey: kCIInputRadiusKey)
-        lens.setValue(diameter * 0.24, forKey: kCIInputWidthKey)
-        lens.setValue(1.62, forKey: kCIInputRefractionKey)
+        // At phase zero these are exactly the original lens values. Only a
+        // tiny, slow variation is added to that same distortion filter.
+        lens.setValue(diameter * (0.24 + 0.0015 * sin(phase)), forKey: kCIInputWidthKey)
+        lens.setValue(1.62 + 0.012 * sin(phase), forKey: kCIInputRefractionKey)
 
         mask.setValue(center, forKey: kCIInputCenterKey)
         mask.setValue(diameter * 0.32, forKey: "inputRadius0")
@@ -391,7 +490,7 @@ private final class PassthroughImageView: NSImageView {
         }
 
         let representation = NSBitmapImageRep(cgImage: cgImage)
-        let renderedImage = NSImage(size: sourceImage.size)
+        let renderedImage = NSImage(size: size)
         renderedImage.addRepresentation(representation)
         return renderedImage
     }

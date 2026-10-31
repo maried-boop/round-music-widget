@@ -1,0 +1,104 @@
+// Generated from orb tool/src/renderer.ts by scripts/sync-orb-renderer.py.
+#include <metal_stdlib>
+using namespace metal;
+struct Uniforms {
+ float4 viewport, glass, movement, material, lens, lensMotion, cycles, color1, color2, color3;
+};
+vertex float4 orbVertex(uint id [[vertex_id]]) {
+ const float2 p[]={float2(-1,-1),float2(3,-1),float2(-1,3)};
+ return float4(p[id],0,1);
+}
+float bell(float x,float w){return exp(-x*x/(w*w));}
+float4 coverAt(float2 p,texture2d<float> artwork){
+ constexpr sampler sample(coord::normalized,address::clamp_to_edge,filter::linear);
+ float2 uv=clamp(p*.5+.5,0.,1.);uv.y=1.-uv.y;
+ return artwork.sample(sample,uv);
+}
+float lensOffset(float q,float strength,texture2d<float> lensMap){
+ if(abs(q)>=1.)return 0.;
+ constexpr sampler sample(coord::normalized,address::clamp_to_edge,filter::linear);
+ float2 uv=float2((q*.5+.5)*511./512.+.5/512.,((clamp(strength,1.,2.5)-1.)*100.+.5)/151.);
+ float2 encoded=lensMap.sample(sample,uv).rg;
+ return dot(encoded,float2(256.,1.))*255./65535.*4.-2.;
+}
+fragment float4 orbFragment(float4 position [[position]],constant Uniforms &u [[buffer(0)]],
+ texture2d<float> artwork [[texture(0)]],texture2d<float> lensMap [[texture(1)]]) {
+
+ float2 p=(float2(position.x,u.viewport.y-position.y)/u.viewport.xy*2.-1.)/u.viewport.w;
+ float r=length(p), a=atan2(p.y,p.x), t=u.viewport.z;
+ float aa=2.6/(u.viewport.xy.x*u.viewport.w);
+ float mask=1.-smoothstep(1.-aa,1.+aa,r);
+ float z=sqrt(max(0.,1.-r*r));
+ float sway=u.movement.y*.24;
+ float angle=.28+sway*sin(t)+t*u.movement.w+u.material.xy.x*u.movement.z*.45;
+ float2x2 rotation=float2x2(float2(cos(angle),-sin(angle)),float2(sin(angle),cos(angle)));
+ float2 q=rotation*p-u.material.xy*u.movement.z*.32*z;
+ // A crescent folded around the sphere with a softly drifting caustic.
+ float curve=q.x + .44*sin(q.y*2.5+t)*u.movement.y + .29*q.y*q.y;
+ float caustic=bell(curve-.46,u.movement.x*.52)*pow(max(0.,1.-r*r),.32);
+ float secondary=bell(q.y+.55+.12*sin(t*2.+q.x*2.),.16)*smoothstep(-.9,.8,q.x);
+ float edge=pow(1.-z,3.5);
+ float line=bell(r-.987,.009+aa);
+ float inner=bell(r-.945,.018);
+ float topLight=pow(max(0.,cos(a-2.15-.18*sin(t)-u.material.xy.x*u.movement.z*.5)),10.);
+ float bottomLight=pow(max(0.,cos(a+.78+.2*cos(t)-u.material.xy.y*u.movement.z*.5)),7.);
+ float colorMix=.5+.5*sin(a*2.+t+z*3.);
+ float3 color=mix(u.color1.xyz,u.color2.xyz,colorMix);
+ float3 crescent=mix(u.color2.xyz,u.color1.xyz,.5+.5*sin(q.y*3.+t));
+ crescent=mix(crescent,crescent*crescent,.32);
+ float fill=.72*caustic+.24*secondary+.22*edge;
+ float frequency=3.+u.material.w*9.;
+ float depth=pow(max(0.,1.-r*r),.24);
+ if(u.material.z>.5 && u.material.z<1.5){
+  float wave=q.y+.32*sin(q.x*frequency*.65+sin(t)*1.4)+.10*sin(q.x*frequency*1.8+cos(t));
+  float ribbon=bell(wave+.20,u.movement.x*.36)+.65*bell(wave-.14,u.movement.x*.22)+.3*bell(wave-.42,u.movement.x*.15);
+  fill=(.75*ribbon+.12*edge)*depth;
+  crescent=mix(u.color1.xyz,u.color2.xyz,.5+.5*sin(q.x*3.+sin(t)+wave*5.));
+ }else if(u.material.z>1.5 && u.material.z<2.5){
+  float liquid=q.x*frequency+1.8*sin(q.y*4.+sin(t))+.7*cos(t);
+  float bands=.5+.5*sin(liquid);
+  float chrome=pow(bands,9.)+.35*pow(1.-bands,3.);
+  fill=(.85*chrome+.10*edge)*depth;
+  crescent=mix(mix(u.color1.xyz,u.color2.xyz,bands),float3(.88,.91,.94),.72);
+ }else if(u.material.z>2.5 && u.material.z<3.5){
+  float2 flow=q+float2(sin(t),cos(t))*.16*u.movement.y;
+  float field=sin(flow.x*frequency+1.4*sin(flow.y*4.+sin(t)))+sin(flow.y*frequency*.8+cos(t)+sin(flow.x*3.));
+  float wisps=exp(-abs(field)*(3.+u.material.w*5.));
+  fill=(.95*wisps+.15*edge)*depth;
+  crescent=mix(u.color1.xyz,u.color2.xyz,.5+.5*sin(field*2.+q.y*3.+sin(t)));
+ }else if(u.material.z>3.5 && u.material.z<4.5){
+  float fold=sin(q.y*frequency+2.4*sin(q.x*3.+sin(t))+.55*cos(t));
+  float silk=pow(.5+.5*fold,4.)*.7+pow(.5-.5*fold,12.)*.25;
+  fill=(silk+.15*edge)*depth;
+  crescent=mix(u.color1.xyz,u.color2.xyz,.5+.5*sin(q.x*3.+fold+cos(t)));
+ }else if(u.material.z>4.5){fill=0.;}
+ float base=u.glass.x*(.24+.30*z);
+ float shade=u.glass.y*fill;
+ float reflection=u.glass.z*(line*(.12+.65*topLight+.30*bottomLight)+inner*.055+edge*.24*topLight);
+ float alpha=(base+shade+reflection)*mask;
+ float3 rgb=color*base+crescent*shade+u.color3.xyz*reflection;
+ rgb*=mask;
+ float halo=u.glass.w*.13*exp(-max(0.,r-1.)*23.)*smoothstep(.99,1.035,r);
+ rgb+=mix(u.color1.xyz,u.color2.xyz,.5+.5*sin(a+t))*halo;
+ alpha+=halo;
+ if(u.lens.y<.5){rgb=float3(0.);alpha=0.;}
+ if(u.lens.x>.5){
+  float lensPhase=t*u.cycles.x;
+  float strength=u.lens.z+.24*u.lensMotion.x*sin(lensPhase);
+  float band=max(.04,u.lens.w+.03*u.lensMotion.z*sin(lensPhase));
+  float travel=.09*u.lensMotion.w*sin(a-lensPhase);
+  float q=(r-1.-travel)/(band*2.);
+  float2 warped=p+p/max(r,.00001)*lensOffset(q,strength,lensMap)*(band*2.);
+  float blend=clamp((r-u.lensMotion.y)/(.98-u.lensMotion.y),0.,1.);
+  float4 cover=mix(coverAt(p,artwork),coverAt(warped,artwork),blend)*mask;
+  // The original widget's neutral glass rim stays separate from the optional orb.
+  float edgeLine=bell(r-(1.-2.4/(u.viewport.xy.x*u.viewport.w)),1.8/(u.viewport.xy.x*u.viewport.w));
+  float glass=edgeLine*.38;
+  cover.rgb=float3(glass)*mask+cover.rgb*(1.-glass);
+  cover.a=glass*mask+cover.a*(1.-glass);
+  rgb+=cover.rgb*(1.-alpha);
+  alpha+=cover.a*(1.-alpha);
+ }
+ return float4(rgb,clamp(alpha,0.,1.));
+
+}
